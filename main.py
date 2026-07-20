@@ -11,7 +11,10 @@ Endpoints:
 import os
 import io
 import base64
-from datetime import date as date_cls
+from datetime import date as date_cls, datetime, timedelta, timezone
+
+IST = timezone(timedelta(hours=5, minutes=30))
+LATE_GRACE_MINUTES = 5  # how many minutes after class end_time marking is still allowed
 from typing import List
 
 import cv2
@@ -197,12 +200,44 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
             "student_id": req.student_id,
         }
 
+    # --- Enforce that marking only happens during the class window (+grace),
+    # using the institute's local time (IST), not the server's UTC clock ---
+    timetable_result = (
+        supabase.table("timetable")
+        .select("start_time, end_time")
+        .eq("id", req.timetable_id)
+        .single()
+        .execute()
+    )
+    if not timetable_result.data:
+        raise HTTPException(status_code=404, detail="Class session not found")
+
+    now_ist = datetime.now(IST)
+    today_ist = now_ist.date()
+
+    start_time_str = timetable_result.data["start_time"]  # e.g. "09:00:00"
+    end_time_str = timetable_result.data["end_time"]        # e.g. "10:00:00"
+    start_dt = datetime.combine(today_ist, datetime.strptime(start_time_str, "%H:%M:%S").time(), tzinfo=IST)
+    end_dt = datetime.combine(today_ist, datetime.strptime(end_time_str, "%H:%M:%S").time(), tzinfo=IST)
+    grace_end_dt = end_dt + timedelta(minutes=LATE_GRACE_MINUTES)
+
+    if now_ist < start_dt:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This class hasn't started yet — attendance opens at {start_time_str[:5]} IST",
+        )
+    if now_ist > grace_end_dt:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Attendance window has closed — this class ended at {end_time_str[:5]} IST",
+        )
+
     # --- Real match confirmed — write the attendance row ourselves (server-authority) ---
     try:
         supabase.table("attendance").insert({
             "student_id": req.student_id,
             "timetable_id": req.timetable_id,
-            "date": date_cls.today().isoformat(),
+            "date": today_ist.isoformat(),
             "status": "present",
             "confidence_score": round(float(best_score), 4),
         }).execute()
