@@ -123,16 +123,27 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
     ear_values = []
     last_face_img = None
     last_face_box = None
+    frames_with_face = 0
+    frames_with_eyes = 0
 
-    for b64 in req.frames_base64:
+    for idx, b64 in enumerate(req.frames_base64):
         img = b64_to_cv2_image(b64)
         face_box = detect_face(img)
         if face_box is None:
+            print(f"[verify-debug] frame {idx}: no face detected")
             continue
+        frames_with_face += 1
         last_face_img, last_face_box = img, face_box
         eyes = detect_eyes(img, face_box)
         if eyes is not None and len(eyes) > 0:
-            ear_values.append(eye_aspect_ratio(eyes))
+            frames_with_eyes += 1
+            ear = eye_aspect_ratio(eyes)
+            ear_values.append(ear)
+            print(f"[verify-debug] frame {idx}: face OK, eyes OK, ear={ear:.4f}")
+        else:
+            print(f"[verify-debug] frame {idx}: face OK, no eyes detected")
+
+    print(f"[verify-debug] TOTAL frames_with_face={frames_with_face} frames_with_eyes={frames_with_eyes} ear_values={ear_values}")
 
     if last_face_img is None:
         raise HTTPException(status_code=400, detail="No face detected in the captured frames")
@@ -143,6 +154,9 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
         min_ear = min(ear_values)
         max_ear = max(ear_values)
         is_live = (max_ear - min_ear) > 0.08  # empirical threshold, tune after testing
+        print(f"[verify-debug] min_ear={min_ear:.4f} max_ear={max_ear:.4f} diff={max_ear-min_ear:.4f} is_live={is_live}")
+    else:
+        print(f"[verify-debug] not enough ear_values to evaluate liveness (need >=3, got {len(ear_values)})")
 
     if not is_live:
         raise HTTPException(
