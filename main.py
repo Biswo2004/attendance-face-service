@@ -2,19 +2,21 @@
 Face Recognition Microservice — pure OpenCV
 Endpoints:
   POST /enroll  -> takes student_id + 2-3 images, stores averaged embedding in Supabase
-  POST /verify  -> takes student_id + a short burst of live frames, runs liveness
-                    (blink check) + face match against stored embedding
+  POST /verify  -> takes student_id + timetable_id + a short burst of live frames,
+                    runs liveness (blink check) + face match against stored embedding,
+                    and — on a real match — writes the attendance row itself
   GET  /health  -> simple health check for Render/HF Spaces
 """
 
 import os
 import io
 import base64
+from datetime import date as date_cls
 from typing import List
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -50,7 +52,8 @@ class EnrollRequest(BaseModel):
 
 class VerifyRequest(BaseModel):
     student_id: str
-    frames_base64: List[str]  # short burst (5-10 frames) captured from webcam
+    timetable_id: str          # which class session this scan is for
+    frames_base64: List[str]   # short burst (5-10 frames) captured from webcam
 
 
 def b64_to_cv2_image(b64_string: str) -> np.ndarray:
@@ -97,9 +100,22 @@ def enroll(req: EnrollRequest):
 
 
 @app.post("/verify")
-def verify(req: VerifyRequest):
+def verify(req: VerifyRequest, authorization: str = Header(None)):
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase not configured")
+
+    # --- Confirm the caller is really logged in as this student ---
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing login session")
+    token = authorization.split(" ", 1)[1]
+    try:
+        user_resp = supabase.auth.get_user(token)
+        caller_id = user_resp.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired login session")
+    if caller_id != req.student_id:
+        raise HTTPException(status_code=403, detail="Login session does not match student_id")
+
     if len(req.frames_base64) < 3:
         raise HTTPException(status_code=400, detail="Provide at least 3 frames for liveness check")
 
@@ -154,8 +170,34 @@ def verify(req: VerifyRequest):
 
     matched = best_score >= MATCH_THRESHOLD
 
-    return {
-        "matched": bool(matched),
-        "confidence": round(float(best_score), 4),
-        "student_id": req.student_id,
-    }
+    if not matched:
+        return {
+            "matched": False,
+            "confidence": round(float(best_score), 4),
+            "student_id": req.student_id,
+        }
+
+    # --- Real match confirmed — write the attendance row ourselves (server-authority) ---
+    try:
+        supabase.table("attendance").insert({
+            "student_id": req.student_id,
+            "timetable_id": req.timetable_id,
+            "date": date_cls.today().isoformat(),
+            "status": "present",
+            "confidence_score": round(float(best_score), 4),
+        }).execute()
+        return {
+            "matched": True,
+            "confidence": round(float(best_score), 4),
+            "student_id": req.student_id,
+            "already_marked": False,
+        }
+    except Exception as e:
+        if "23505" in str(e) or "duplicate key" in str(e).lower():
+            return {
+                "matched": True,
+                "confidence": round(float(best_score), 4),
+                "student_id": req.student_id,
+                "already_marked": True,
+            }
+        raise HTTPException(status_code=500, detail=f"Verified but failed to record attendance: {e}")
