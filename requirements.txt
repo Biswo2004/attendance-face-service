@@ -4,4 +4,5 @@ opencv-python-headless==4.10.0.84
 numpy==1.26.4
 supabase==2.5.0
 pydantic==2.7.4
-mediapipe
+mediapipe==0.10.14
+protobuf==4.25.3
