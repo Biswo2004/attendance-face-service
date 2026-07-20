@@ -26,6 +26,7 @@ from face_utils import (
     get_embedding,
     cosine_similarity,
     detect_eyes,
+    get_real_ear,
 )
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -118,16 +119,13 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
     if len(req.frames_base64) < 3:
         raise HTTPException(status_code=400, detail="Provide at least 3 frames for liveness check")
 
-    # --- Liveness: a real blink shows up as eye-detection dropping out and
-    # coming back across the burst (Haar-cascade eye boxes don't shrink as an
-    # eye closes — the detector just fails to find the eye at all when it's
-    # closed enough). A static photo held up to the camera will instead show
-    # eyes consistently detected (or consistently not detected) every frame,
-    # with no such drop-out/recovery pattern. ---
+    # --- Liveness: real eye-aspect-ratio (EAR) via MediaPipe face-mesh
+    # landmarks. A genuine blink causes this value to actually dip, unlike
+    # the earlier Haar-cascade box-shape approach. ---
     last_face_img = None
     last_face_box = None
     frames_with_face = 0
-    eyes_detected_flags = []
+    ear_values = []
 
     for idx, b64 in enumerate(req.frames_base64):
         img = b64_to_cv2_image(b64)
@@ -137,20 +135,26 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
             continue
         frames_with_face += 1
         last_face_img, last_face_box = img, face_box
-        eyes = detect_eyes(img, face_box)
-        found = eyes is not None and len(eyes) > 0
-        eyes_detected_flags.append(found)
-        print(f"[verify-debug] frame {idx}: face OK, eyes_detected={found}")
+        ear = get_real_ear(img)
+        if ear is not None:
+            ear_values.append(ear)
+            print(f"[verify-debug] frame {idx}: face OK, ear={ear:.4f}")
+        else:
+            print(f"[verify-debug] frame {idx}: face OK, no landmarks/ear")
 
-    print(f"[verify-debug] TOTAL frames_with_face={frames_with_face} eyes_detected_flags={eyes_detected_flags}")
+    print(f"[verify-debug] TOTAL frames_with_face={frames_with_face} ear_values={ear_values}")
 
     if last_face_img is None:
         raise HTTPException(status_code=400, detail="No face detected in the captured frames")
 
-    has_open_frame = any(eyes_detected_flags)
-    has_missed_frame = any(not f for f in eyes_detected_flags)
-    is_live = len(eyes_detected_flags) >= 3 and has_open_frame and has_missed_frame
-    print(f"[verify-debug] has_open_frame={has_open_frame} has_missed_frame={has_missed_frame} is_live={is_live}")
+    is_live = False
+    if len(ear_values) >= 3:
+        min_ear = min(ear_values)
+        max_ear = max(ear_values)
+        is_live = (max_ear - min_ear) > 0.15  # empirical threshold for real EAR, tune after testing
+        print(f"[verify-debug] min_ear={min_ear:.4f} max_ear={max_ear:.4f} diff={max_ear-min_ear:.4f} is_live={is_live}")
+    else:
+        print(f"[verify-debug] not enough ear_values to evaluate liveness (need >=3, got {len(ear_values)})")
 
     if not is_live:
         raise HTTPException(
