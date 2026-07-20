@@ -131,7 +131,7 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
             continue
         last_face_img, last_face_box = img, face_box
         eyes = detect_eyes(img, face_box)
-        if eyes:
+        if eyes is not None and len(eyes) > 0:
             ear_values.append(eye_aspect_ratio(eyes))
 
     if last_face_img is None:
