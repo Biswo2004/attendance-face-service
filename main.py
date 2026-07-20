@@ -176,7 +176,15 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
 
     best_score = -1.0
     for row in result.data:
-        stored_embedding = np.array(row["embedding"])
+        raw_embedding = row["embedding"]
+        if isinstance(raw_embedding, str):
+            # Supabase/PostgREST can return pgvector columns as a text
+            # representation like "[0.1,0.2,...]" rather than a real list —
+            # parse it back into actual numbers before doing any math.
+            raw_embedding = raw_embedding.strip("[]")
+            stored_embedding = np.array([float(x) for x in raw_embedding.split(",")])
+        else:
+            stored_embedding = np.array(raw_embedding)
         score = cosine_similarity(live_embedding, stored_embedding)
         best_score = max(best_score, score)
 
