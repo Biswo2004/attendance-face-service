@@ -214,7 +214,7 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
     # using the institute's local time (IST), not the server's UTC clock ---
     timetable_result = (
         supabase.table("timetable")
-        .select("start_time, end_time")
+        .select("start_time, end_time, institute_id, department, batch_id, section")
         .eq("id", req.timetable_id)
         .single()
         .execute()
@@ -225,8 +225,39 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
     now_ist = datetime.now(IST)
     today_ist = now_ist.date()
 
-    start_time_str = timetable_result.data["start_time"]  # e.g. "09:00:00"
-    end_time_str = timetable_result.data["end_time"]        # e.g. "10:00:00"
+    # --- Enforce that today falls within this section's currently
+    # configured semester dates — prevents marking before a semester has
+    # started or after it has ended, until an admin sets up the next one ---
+    tt = timetable_result.data
+    section_result = (
+        supabase.table("sections")
+        .select("semester_start_date, semester_end_date")
+        .eq("institute_id", tt["institute_id"])
+        .eq("department", tt["department"])
+        .eq("batch_id", tt["batch_id"])
+        .eq("name", tt["section"])
+        .single()
+        .execute()
+    )
+    if not section_result.data:
+        raise HTTPException(status_code=404, detail="Section configuration not found")
+
+    sem_start = section_result.data.get("semester_start_date")
+    sem_end = section_result.data.get("semester_end_date")
+
+    if sem_start and today_ist < datetime.strptime(sem_start, "%Y-%m-%d").date():
+        raise HTTPException(
+            status_code=400,
+            detail="This semester hasn't started yet — attendance isn't open",
+        )
+    if sem_end and today_ist > datetime.strptime(sem_end, "%Y-%m-%d").date():
+        raise HTTPException(
+            status_code=400,
+            detail="This semester has ended — attendance is closed until the next semester's timetable is set up",
+        )
+
+    start_time_str = tt["start_time"]  # e.g. "09:00:00"
+    end_time_str = tt["end_time"]        # e.g. "10:00:00"
     start_dt = datetime.combine(today_ist, datetime.strptime(start_time_str, "%H:%M:%S").time(), tzinfo=IST)
     end_dt = datetime.combine(today_ist, datetime.strptime(end_time_str, "%H:%M:%S").time(), tzinfo=IST)
     grace_end_dt = end_dt + timedelta(minutes=LATE_GRACE_MINUTES)
