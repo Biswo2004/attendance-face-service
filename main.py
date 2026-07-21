@@ -154,8 +154,18 @@ def verify(req: VerifyRequest, authorization: str = Header(None)):
     if len(ear_values) >= 3:
         min_ear = min(ear_values)
         max_ear = max(ear_values)
-        is_live = (max_ear - min_ear) > 0.15  # empirical threshold for real EAR, tune after testing
-        print(f"[verify-debug] min_ear={min_ear:.4f} max_ear={max_ear:.4f} diff={max_ear-min_ear:.4f} is_live={is_live}")
+        # Self-calibrating check: instead of one fixed number for every
+        # person (which breaks down for people with naturally
+        # smaller/larger eye-openness ranges), we measure each person's
+        # blink RELATIVE TO THEIR OWN open-eye baseline (max_ear) captured
+        # in this same burst. A real blink should dip at least ~25% below
+        # that person's own baseline. We also sanity-check that the
+        # baseline itself looks like a genuinely open eye (not a face
+        # turned away or a bad-quality frame throughout).
+        baseline_is_plausible = max_ear > 0.15
+        relative_dip = (max_ear - min_ear) / max_ear if max_ear > 0 else 0
+        is_live = baseline_is_plausible and relative_dip > 0.25
+        print(f"[verify-debug] min_ear={min_ear:.4f} max_ear={max_ear:.4f} relative_dip={relative_dip:.3f} baseline_ok={baseline_is_plausible} is_live={is_live}")
     else:
         print(f"[verify-debug] not enough ear_values to evaluate liveness (need >=3, got {len(ear_values)})")
 
